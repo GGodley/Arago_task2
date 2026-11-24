@@ -13,7 +13,7 @@ Throughput is one vector per cycle.
 - `model/`: bit-accurate Python models used to validate the architecture before RTL (NumPy). `validate_signflip_slice.py` matches the RTL; the others are the alternatives evaluated (XOR-key, dual-polarity select, unified slice)
 
 ## Status
-Audit-fix revision (see below). Icarus Verilog 12: TEST PASSED for PIPE = 0, 1 and 2 (260,734 to 260,735 results each, 0 errors, 0 golden/reference mismatches, no coverage holes). Verilator 5.020 `-Wall` lint and full build: clean for PIPE = 0, 1, 2. Yosys 0.33 `check` (hierarchical and flattened): 0 problems; generic synthesis gives about 590 cells for each PIPE value. PIPE outside 0..2 stops elaboration. The `$readmemh` "Not enough words" warning is expected: the vector memory is sized larger than the file.
+Audit-fix revision (see below). Icarus Verilog 12: TEST PASSED for PIPE = 0, 1 and 2 (260,734 to 260,735 results each, 0 errors, 0 golden/reference mismatches, no coverage holes). Verilator 5.020 `-Wall` lint and full build: clean for PIPE = 0, 1, 2. Yosys 0.33 `check` (hierarchical and flattened): 0 problems; generic synthesis gives 586, 588 and 573 cells (84, 103 and 139 flops) for PIPE = 0, 1 and 2. PIPE outside 0..2 stops elaboration. The `$readmemh` "Not enough words" warning is expected: the vector memory is sized larger than the file.
 
 ## Run (Icarus Verilog 12 or newer)
 ```
