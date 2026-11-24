@@ -8,14 +8,16 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p build
 PIPES=${1:-"0 1 2"}
+RTL="rtl_verilog/cmp_slice.v rtl_verilog/cmp_pair.v rtl_verilog/pipe_reg.v rtl_verilog/vec_max_alu.v"
 EXTRA=""
 [ "${VCD:-0}" = "1" ] && EXTRA="+VCD"
 status=0
 for P in $PIPES; do
     echo "=== Verilog DUT, PIPE=$P ==="
-    iverilog -g2001 -Wall -tnull -P "vec_max_alu.PIPE=$P" rtl_verilog/cmp_slice.v rtl_verilog/vec_max_alu.v
-    iverilog -g2012 -Wall -o "build/simv_p$P" -P "tb_vec_max_alu.PIPE=$P" \
-        rtl_verilog/cmp_slice.v rtl_verilog/vec_max_alu.v tb/tb_vec_max_alu.sv
+    iverilog -g2001 -Wall -tnull -P "vec_max_alu.PIPE=$P" $RTL
+    # Testbench first: its `timescale then applies to the RTL (the RTL sets none).
+    iverilog -g2012 -Wall -Wno-timescale -o "build/simv_p$P" -P "tb_vec_max_alu.PIPE=$P" \
+        tb/tb_vec_max_alu.sv $RTL
     vvp -n "build/simv_p$P" +VECTORS=tb/vectors.hex $EXTRA | tee "build/simv_p$P.log"
     if ! grep -q "TEST PASSED" "build/simv_p$P.log"; then status=1; fi
 done

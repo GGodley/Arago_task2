@@ -17,15 +17,17 @@
 //
 // Timescale is set by the simulation build (see scripts/run_sim.sh), not here.
 
+`default_nettype none
+
 module cmp_slice (
-    input  logic [7:0] a,
-    input  logic [7:0] b,
-    input  logic       is_signed,   // bit 7 is a sign bit
-    input  logic       chain_en,    // extend compare over lower partner
-    input  logic       gt_in,       // lower partner's pick (unsigned a > b)
-    input  logic       inv_neg,     // BF16: flip decision when both negative
-    input  logic       use_ext_sel, // mux follows ext_sel instead of own pick
-    input  logic       ext_sel,
+    input  wire  [7:0] a,
+    input  wire  [7:0] b,
+    input  wire        is_signed,   // bit 7 is a sign bit
+    input  wire        chain_en,    // extend compare over lower partner
+    input  wire        gt_in,       // lower partner's pick (unsigned a > b)
+    input  wire        inv_neg,     // BF16: flip decision when both negative
+    input  wire        use_ext_sel, // mux follows ext_sel instead of own pick
+    input  wire        ext_sel,
     output logic       pick,        // 1 = a is the max
     output logic [7:0] y            // winning byte, original bits
 );
@@ -47,3 +49,5 @@ module cmp_slice (
     assign sel  = use_ext_sel ? ext_sel : pick;
     assign y    = sel ? a : b;
 endmodule
+
+`default_nettype wire

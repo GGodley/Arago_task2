@@ -1,213 +1,206 @@
 // vec_max_alu: reconfigurable vector max unit (Arago Task 2).
-// Verilog-2001 port of rtl/vec_max_alu.sv. Same ports, same PIPE parameter,
-// same seven shared cmp_slice instances (S0..S6), same register placement.
+// Verilog-2001 version of rtl/vec_max_alu.sv (same ports, same behaviour).
 //
 // in_vec[63:0] is read as 8 x INT8 (mode 00), 4 x INT16 (mode 01) or 4 x BF16 (mode 10).
-// Mode 11 is undefined by the spec and behaves as INT16.
-// result[15:0] = max of the vector. INT8 results are sign-extended to 16 bits.
+// Mode 11 is undefined by the spec and behaves as INT16 (a legal input, not an error).
+// result[15:0] = max of the vector. INT8: the max is in result[7:0] and the upper byte,
+// which the spec discards, is driven to zero (fewer loads on the INT8 path, less toggling).
 // BF16 follows IEEE 754-2019 maximum: any NaN -> canonical qNaN 16'h7FC0, -0 < +0.
 //
-// Throughput: one vector per cycle. Latency: PIPE + 2 cycles (input reg, PIPE
-// internal stages, output reg). PIPE = 0, 1 (cut after L2, default) or 2 (cuts
-// after L1 and after L2).
+// Throughput: one vector per cycle. Latency: if the input register captures a vector
+// at clock edge k, result and out_valid are registered at edge k + PIPE + 1 (PIPE + 2
+// edges counting both ends). PIPE = 0, 1 (cut after L2, default) or 2 (cuts after L1
+// and after L2). Any other value stops elaboration.
 //
-// Lanes: INT8 byte i = in_vec[8i+7:8i]. 16-bit lane j = in_vec[16j+15:16j].
-// Tree pairing pairs bytes two apart (B0/B2, B1/B3, B4/B6, B5/B7), so the
-// INT16/BF16 tree is a subset of the INT8 tree and every slice is shared.
+// Structure (seven cmp_slice instances, all shared by every mode):
+//   stage 0  input register (mode decoded before it)
+//   L1       u_l1_p0 = S0/S1: lane 0 vs lane 1    u_l1_p1 = S2/S3: lane 2 vs lane 3
+//   stage 1  optional register (PIPE >= 2)
+//   L2       u_l2    = S4/S5: winner of L1 pair 0 vs winner of L1 pair 1
+//            INT16/BF16 are finished here.
+//   stage 2  optional register (PIPE >= 1)
+//   L3       u_l3    = S6: low byte vs high byte of the L2 winner (INT8 only)
+//   output   output register
+// A NaN detector runs beside L1, gated by BF16 mode.
 //
-// SV -> Verilog mapping used in this file:
-//   SV                                   Verilog-2001
-//   ---------------------------------    ----------------------------------------
-//   parameter int PIPE = 1               parameter integer PIPE = 1
-//   logic, written in always_ff          reg
-//   logic, driven by assign / port       wire
-//   always_ff @(posedge clk ...)         always @(posedge clk ...)
-//   always_comb                          always @(*)
-//   for (int j = 0; j < 4; j++)          integer j;  for (j = 0; j < 4; j = j + 1)
-//   for (p = 0; p < 2; p++) (generate)   for (p = 0; p < 2; p = p + 1)
-//   output logic (written in always_ff)  output reg
-//   x[hi -: 8] part selects              unchanged: "-:" is already Verilog-2001
+// Why the PIPE = 1 cut is after L2, not after L1: both give about the same fmax,
+// but after L2 only 16 data bits survive, so the register is about 20 flops
+// instead of about 36.
 //
-// The one structural difference: in SV a "logic" signal can be a flop in one
-// generate branch and a plain assign in the other. In Verilog a signal is
-// either a reg or a wire, never both. So each optional pipeline stage below
-// declares its flops (v1_q, m1_q, ...) locally inside the generate branch that
-// uses them, and the stage outputs (v1, m1, ...) are always wires: assigned
-// from the flops when the stage exists, or straight from the previous stage
-// when it does not. The hardware is identical.
-`timescale 1ns/1ps
+// Why the input is registered: the 16-bit compare chain starts at the input.
+// Without this register the slowest stage would also absorb an unknown upstream
+// delay, and the block would have no clean timing boundary.
+//
+// Reset: only the valid bits are reset. Data flops load only with a valid vector.
+//
+// Naming: sN_* is the output of pipeline stage N (s0 = input register,
+// s1 = after L1, s2 = after L2). lN_* is the combinational output of tree level N.
+// Lanes: 16-bit lane j = in_vec[16j+15:16j], INT8 byte i = in_vec[8i+7:8i].
+//
+// Timescale is set by the simulation build (see scripts/run_sim_verilog.sh), not here.
+
+`default_nettype none
 
 module vec_max_alu #(
     parameter integer PIPE = 1
 ) (
-    input  wire        clk,
-    input  wire        rst_n,
-    input  wire        in_valid,
-    input  wire [1:0]  mode,
-    input  wire [63:0] in_vec,
-    output reg         out_valid,
-    output reg  [15:0] result
+    input  wire         clk,
+    input  wire         rst_n,
+    input  wire         in_valid,
+    input  wire  [1:0]  mode,
+    input  wire  [63:0] in_vec,
+    output wire         out_valid,
+    output wire  [15:0] result
 );
-    // ------------------------------------------------------------------
-    // Input register. The mode is decoded before the register so the
-    // high-fanout control bits start from a flop.
-    // ------------------------------------------------------------------
-    reg        v0, i8_0, bf_0;
-    reg [63:0] x0;
+    localparam [1:0]  MODE_INT8     = 2'b00;
+    localparam [1:0]  MODE_BF16     = 2'b10;   // 2'b01 and 2'b11: 16-bit integer
+    localparam [7:0]  BF16_EXP_ONES = 8'hFF;   // exponent of Inf and NaN
+    localparam [15:0] BF16_QNAN     = 16'h7FC0;
 
-    // Valid bit: async active-low reset (the only reset flops in the design)
-    always @(posedge clk or negedge rst_n)
-        if (!rst_n) v0 <= 1'b0;
-        else        v0 <= in_valid;
-
-    // Data flops: no reset, only load when the input is valid
-    always @(posedge clk)
-        if (in_valid) begin
-            x0   <= in_vec;
-            i8_0 <= (mode == 2'b00);
-            bf_0 <= (mode == 2'b10);
-        end
-
-    // ------------------------------------------------------------------
-    // NaN side path (computed on raw lanes, never on the critical path)
-    // A lane is NaN when exponent bits [14:7] are all ones and mantissa
-    // bits [6:0] are non-zero.
-    // ------------------------------------------------------------------
-    reg     nan_0;   // reg because it is written in an always block; it is still combinational
-    integer j;
-    always @(*) begin
-        nan_0 = 1'b0;
-        for (j = 0; j < 4; j = j + 1)
-            nan_0 = nan_0 | ((x0[16*j+14 -: 8] == 8'hFF) && (x0[16*j+6 -: 7] != 7'd0));
-    end
-
-    // ------------------------------------------------------------------
-    // Level 1: two pairs. Pair p compares lanes 2p and 2p+1.
-    //   u_lo = S0 (p=0) / S2 (p=1): low bytes,  B0 vs B2 / B4 vs B6
-    //   u_hi = S1 (p=0) / S3 (p=1): high bytes, B1 vs B3 / B5 vs B7
-    // In INT16/BF16 the high slice chains over the low one (chain_en) and
-    // the low slice's mux follows the high slice's pick (use_ext_sel).
-    // ------------------------------------------------------------------
-    // l1 bytes: [7:0]=S0 (low, pair 0), [15:8]=S1 (high, pair 0), [23:16]=S2, [31:24]=S3
-    wire [31:0] l1;
-    wire [1:0]  pk_lo1, pk_hi1;
-
-    genvar p;
+    // PIPE guard: only 0, 1 and 2 are supported. Verilog-2001 has no elaboration-time
+    // $fatal, so an illegal PIPE instantiates a module that does not exist. Every
+    // simulator, linter and synthesis tool then stops with an error naming it.
     generate
-        for (p = 0; p < 2; p = p + 1) begin : g_l1
-            cmp_slice u_lo (
-                .a(x0[32*p + 7  -: 8]), .b(x0[32*p + 23 -: 8]),
-                .is_signed(i8_0), .chain_en(1'b0), .gt_in(1'b0), .inv_neg(1'b0),
-                .use_ext_sel(~i8_0), .ext_sel(pk_hi1[p]),
-                .pick(pk_lo1[p]), .y(l1[16*p + 7 -: 8])
-            );
-            cmp_slice u_hi (
-                .a(x0[32*p + 15 -: 8]), .b(x0[32*p + 31 -: 8]),
-                .is_signed(1'b1), .chain_en(~i8_0), .gt_in(pk_lo1[p]), .inv_neg(bf_0),
-                .use_ext_sel(1'b0), .ext_sel(1'b0),
-                .pick(pk_hi1[p]), .y(l1[16*p + 15 -: 8])
-            );
+        if (PIPE < 0 || PIPE > 2) begin : g_bad_pipe
+            ERROR_vec_max_alu_PIPE_must_be_0_1_or_2 u_bad_pipe ();
         end
     endgenerate
 
     // ------------------------------------------------------------------
-    // Optional register after L1 (PIPE >= 2)
+    // Stage 0: input register
     // ------------------------------------------------------------------
-    wire        v1, i8_1, bf_1, nan_1;   // stage outputs, always wires
-    wire [31:0] m1;
+    wire        s0_valid, s0_i8, s0_bf;
+    wire [63:0] s0_vec;
 
-    generate
-        if (PIPE >= 2) begin : g_reg1
-            reg        v1_q, i8_1_q, bf_1_q, nan_1_q;   // flops exist only in this branch
-            reg [31:0] m1_q;
-            always @(posedge clk or negedge rst_n)
-                if (!rst_n) v1_q <= 1'b0;
-                else        v1_q <= v0;
-            always @(posedge clk)
-                if (v0) begin
-                    m1_q    <= l1;
-                    i8_1_q  <= i8_0;  bf_1_q  <= bf_0;  nan_1_q <= nan_0;
-                end
-            assign v1 = v1_q;  assign i8_1 = i8_1_q;  assign bf_1 = bf_1_q;  assign nan_1 = nan_1_q;
-            assign m1 = m1_q;
-        end else begin : g_wire1
-            assign v1 = v0;  assign i8_1 = i8_0;  assign bf_1 = bf_0;  assign nan_1 = nan_0;
-            assign m1 = l1;
-        end
-    endgenerate
-
-    // ------------------------------------------------------------------
-    // Level 2: one pair (S4 low bytes, S5 high bytes). INT16/BF16 finish here.
-    // ------------------------------------------------------------------
-    wire [7:0] t0, t1;
-    wire       pk_lo2, pk_hi2;
-
-    cmp_slice u_s4 (
-        .a(m1[7:0]), .b(m1[23:16]),
-        .is_signed(i8_1), .chain_en(1'b0), .gt_in(1'b0), .inv_neg(1'b0),
-        .use_ext_sel(~i8_1), .ext_sel(pk_hi2),
-        .pick(pk_lo2), .y(t0)
+    pipe_reg #(.WIDTH(66), .EN(1'b1)) u_s0 (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .in_valid (in_valid),
+        .d        ({mode == MODE_INT8, mode == MODE_BF16, in_vec}),
+        .out_valid(s0_valid),
+        .q        ({s0_i8, s0_bf, s0_vec})
     );
-    cmp_slice u_s5 (
-        .a(m1[15:8]), .b(m1[31:24]),
-        .is_signed(1'b1), .chain_en(~i8_1), .gt_in(pk_lo2), .inv_neg(bf_1),
-        .use_ext_sel(1'b0), .ext_sel(1'b0),
-        .pick(pk_hi2), .y(t1)
+
+    wire [15:0] s0_lane0, s0_lane1, s0_lane2, s0_lane3;
+    assign {s0_lane3, s0_lane2, s0_lane1, s0_lane0} = s0_vec;
+
+    // ------------------------------------------------------------------
+    // NaN side path, beside L1 and never on the critical path. Gated by BF16
+    // mode, so the flag and its pipeline flops stay quiet in INT8/INT16 and
+    // the output select needs no separate bf bit after L2.
+    // ------------------------------------------------------------------
+    function is_nan;
+        input [14:0] x;   // sign bit not needed
+        begin
+            is_nan = (x[14:7] == BF16_EXP_ONES) && (x[6:0] != 7'd0);   // exponent all ones, mantissa non-zero
+        end
+    endfunction
+
+    wire s0_nan;
+    assign s0_nan = s0_bf & (is_nan(s0_lane0[14:0]) | is_nan(s0_lane1[14:0]) |
+                             is_nan(s0_lane2[14:0]) | is_nan(s0_lane3[14:0]));
+
+    // ------------------------------------------------------------------
+    // Level 1: lane 0 vs lane 1 (S0/S1), lane 2 vs lane 3 (S2/S3)
+    // ------------------------------------------------------------------
+    wire [15:0] l1_win0, l1_win1;
+
+    cmp_pair u_l1_p0 (
+        .a (s0_lane0),
+        .b (s0_lane1),
+        .i8(s0_i8),
+        .bf(s0_bf),
+        .y (l1_win0)
+    );
+
+    cmp_pair u_l1_p1 (
+        .a (s0_lane2),
+        .b (s0_lane3),
+        .i8(s0_i8),
+        .bf(s0_bf),
+        .y (l1_win1)
     );
 
     // ------------------------------------------------------------------
-    // Register after L2 (PIPE >= 1)
+    // Stage 1: optional register after L1 (PIPE >= 2)
     // ------------------------------------------------------------------
-    wire       v2, i8_2, bf_2, nan_2;   // stage outputs, always wires
-    wire [7:0] t0_2, t1_2;
+    wire        s1_valid, s1_i8, s1_bf, s1_nan;
+    wire [15:0] s1_win0, s1_win1;
 
-    generate
-        if (PIPE >= 1) begin : g_reg2
-            reg       v2_q, i8_2_q, bf_2_q, nan_2_q;   // flops exist only in this branch
-            reg [7:0] t0_2_q, t1_2_q;
-            always @(posedge clk or negedge rst_n)
-                if (!rst_n) v2_q <= 1'b0;
-                else        v2_q <= v1;
-            always @(posedge clk)
-                if (v1) begin
-                    t0_2_q <= t0;  t1_2_q <= t1;
-                    i8_2_q <= i8_1; bf_2_q <= bf_1; nan_2_q <= nan_1;
-                end
-            assign v2 = v2_q;  assign i8_2 = i8_2_q;  assign bf_2 = bf_2_q;  assign nan_2 = nan_2_q;
-            assign t0_2 = t0_2_q; assign t1_2 = t1_2_q;
-        end else begin : g_wire2
-            assign v2 = v1;  assign i8_2 = i8_1;  assign bf_2 = bf_1;  assign nan_2 = nan_1;
-            assign t0_2 = t0; assign t1_2 = t1;
-        end
-    endgenerate
+    pipe_reg #(.WIDTH(35), .EN(PIPE >= 2)) u_s1 (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .in_valid (s0_valid),
+        .d        ({s0_i8, s0_bf, s0_nan, l1_win1, l1_win0}),
+        .out_valid(s1_valid),
+        .q        ({s1_i8, s1_bf, s1_nan, s1_win1, s1_win0})
+    );
 
     // ------------------------------------------------------------------
-    // Level 3 (S6, INT8 only) and output select
+    // Level 2: L1 winner 0 vs L1 winner 1 (S4/S5). INT16/BF16 finish here.
     // ------------------------------------------------------------------
-    wire [7:0]  y6;
-    wire        pk6;   // unused: S6's mux already selects y6
+    wire [15:0] l2_win;
+
+    cmp_pair u_l2 (
+        .a (s1_win0),
+        .b (s1_win1),
+        .i8(s1_i8),
+        .bf(s1_bf),
+        .y (l2_win)
+    );
+
+    // ------------------------------------------------------------------
+    // Stage 2: register after L2 (PIPE >= 1). No bf bit from here on:
+    // s1_nan is already gated by BF16 mode.
+    // ------------------------------------------------------------------
+    wire        s2_valid, s2_i8, s2_nan;
+    wire [15:0] s2_win;
+
+    pipe_reg #(.WIDTH(18), .EN(PIPE >= 1)) u_s2 (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .in_valid (s1_valid),
+        .d        ({s1_i8, s1_nan, l2_win}),
+        .out_valid(s2_valid),
+        .q        ({s2_i8, s2_nan, s2_win})
+    );
+
+    // ------------------------------------------------------------------
+    // Level 3 (S6, INT8 only): low byte vs high byte of the L2 winner
+    // ------------------------------------------------------------------
+    wire [7:0] l3_win;
+
+    /* verilator lint_off PINCONNECTEMPTY */
+    cmp_slice u_l3 (
+        .a          (s2_win[7:0]),
+        .b          (s2_win[15:8]),
+        .is_signed  (1'b1),
+        .chain_en   (1'b0),
+        .gt_in      (1'b0),
+        .inv_neg    (1'b0),
+        .use_ext_sel(1'b0),
+        .ext_sel    (1'b0),
+        .pick       (),            // not needed at the last level
+        .y          (l3_win)
+    );
+    /* verilator lint_on PINCONNECTEMPTY */
+
+    // ------------------------------------------------------------------
+    // Output select and output register
+    // ------------------------------------------------------------------
     wire [15:0] result_d;
+    assign result_d = s2_nan ? BF16_QNAN        :
+                      s2_i8  ? {8'h00, l3_win}  :   // INT8: upper byte discarded by spec
+                               s2_win;
 
-    cmp_slice u_s6 (
-        .a(t0_2), .b(t1_2),
-        .is_signed(1'b1), .chain_en(1'b0), .gt_in(1'b0), .inv_neg(1'b0),
-        .use_ext_sel(1'b0), .ext_sel(1'b0),
-        .pick(pk6), .y(y6)
+    pipe_reg #(.WIDTH(16), .EN(1'b1)) u_out (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .in_valid (s2_valid),
+        .d        (result_d),
+        .out_valid(out_valid),
+        .q        (result)
     );
-
-    wire [15:0] int8_ext;
-    assign int8_ext = {{8{y6[7]}}, y6};          // INT8 result, sign-extended to 16 bits
-    assign result_d = (bf_2 && nan_2) ? 16'h7FC0 :
-                      i8_2            ? int8_ext  :
-                                        {t1_2, t0_2};
-
-    // ------------------------------------------------------------------
-    // Output register
-    // ------------------------------------------------------------------
-    always @(posedge clk or negedge rst_n)
-        if (!rst_n) out_valid <= 1'b0;
-        else        out_valid <= v2;
-
-    always @(posedge clk)
-        if (v2) result <= result_d;
 endmodule
+
+`default_nettype wire

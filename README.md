@@ -5,14 +5,17 @@ Throughput is one vector per cycle.
 
 ## Layout
 - `rtl/cmp_slice.sv`: the single comparator block used for all seven slices (S0..S6)
-- `rtl/vec_max_alu.sv`: top level, 3-level comparator tree, NaN side path, `PIPE` parameter (0, 1, 2)
+- `rtl/cmp_pair.sv`: two chained slices = one 16-bit comparator (or two INT8 compares); keeps the cross-wiring inside one module
+- `rtl/pipe_reg.sv`: one pipeline stage (reset valid bit + valid-gated data), or a bypass when `EN = 0`
+- `rtl/vec_max_alu.sv`: top level: three `cmp_pair` (L1 x2, L2) + S6, NaN side path, `PIPE` parameter (0, 1, 2)
 - `tb/tb_vec_max_alu.sv`: self-checking testbench (golden vectors + independent SV reference model)
 - `tb/vectors.hex`: 160,684 golden vectors (`{mode, in_vec, expected}`)
 - `scripts/gen_vectors.py`: regenerates `tb/vectors.hex`
 - `scripts/run_sim.sh`: compiles and runs the testbench for PIPE = 0, 1, 2
-- `rtl_verilog/`: plain Verilog-2001 port of the RTL (same ports, `PIPE`, slice reuse); header comments map each SV construct to Verilog
-- `scripts/run_sim_verilog.sh`: runs the same testbench on the Verilog port (also compiles it alone with `-g2001`)
-- `scripts/check_equiv.sh` + `tb/tb_equiv_sv_vs_v.sv`: runs SV and Verilog side by side and checks outputs match every cycle
+- `rtl_verilog/`: Verilog-2001 version of the same four modules (same names, ports, structure)
+- `scripts/run_sim_verilog.sh`: compiles the Verilog alone with `-g2001`, then runs the same testbench on it
+- `scripts/check_equiv.sh` + `tb/tb_equiv_sv_vs_v.sv`: SV and Verilog side by side, outputs compared every cycle (500k cycles per PIPE)
+- `scripts/prove_equiv.sh`: formal equivalence of SV and Verilog with Yosys (SAT induction)
 - `model/`: bit-accurate Python models used to validate the architecture before RTL (NumPy). `validate_signflip_slice.py` matches the RTL; the others are the alternatives evaluated (XOR-key, dual-polarity select, unified slice)
 
 ## Status
@@ -35,6 +38,13 @@ Each run ends with `TEST PASSED (PIPE=n)` or `TEST FAILED (PIPE=n)`. Logs are in
 | `in_vec` | 64 | INT8 byte i = `in_vec[8i+7:8i]`, 16-bit lane j = `in_vec[16j+15:16j]` |
 | `out_valid` | 1 | Result valid, PIPE + 2 clock edges after the input is sampled |
 | `result` | 16 | Max. INT8: max in `result[7:0]`, upper byte zero (the spec discards it). BF16: any NaN gives 16'h7FC0, -0 < +0 |
+
+## Changes after the RTL readability review
+- The cross-wired slice pair is now its own module, `cmp_pair`, fed with whole 16-bit lanes (pairing B0/B2, B1/B3 falls out of the lane layout). The top level is strictly feed-forward.
+- Every pipeline stage, including the input and output registers, is one `pipe_reg` instance; no generate blocks in the top level.
+- Named constants for the BF16 exponent and canonical qNaN, one port connection per line, `default_nettype none` in every RTL file (reset to `wire` at the end).
+- Verilog-2001 version in `rtl_verilog/`. Its PIPE guard instantiates a non-existent module, because Verilog-2001 has no elaboration-time `$fatal`.
+- Checked: testbench passes on both versions for PIPE = 0, 1, 2; Verilator `-Wall` clean on both; the split RTL is formally proven equivalent to the earlier flat RTL and to the Verilog version. Flops are unchanged (84, 103, 139); generic cell counts and depth move by synthesis noise only (within one gate level and a few percent).
 
 ## Changes after the external audit
 Adopted:

@@ -1,9 +1,9 @@
-// Lockstep equivalence check: SystemVerilog RTL vs the Verilog-2001 port.
+// Lockstep equivalence check: SystemVerilog RTL vs the Verilog-2001 version.
 // Both DUTs get the same stimulus every cycle; out_valid and result must match
 // bit for bit on every rising edge (X compared as X via !==). Stimulus covers all
 // four modes (including undefined mode 11), random valid gaps, BF16/INT corner
 // values and random async resets.
-// The SV copy is renamed to vec_max_alu_sv / cmp_slice_sv by scripts/check_equiv.sh.
+// The SV modules are renamed with an _sv suffix by scripts/check_equiv.sh.
 `timescale 1ns/1ps
 
 module tb_equiv_sv_vs_v;
