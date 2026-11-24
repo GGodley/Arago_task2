@@ -13,7 +13,7 @@ Throughput is one vector per cycle.
 - `model/`: bit-accurate Python models used to validate the architecture before RTL (NumPy). `validate_signflip_slice.py` matches the RTL; the others are the alternatives evaluated (XOR-key, dual-polarity select, unified slice)
 
 ## Status
-First RTL version. Python models pass 4.34M vectors; the RTL testbench has not been run yet.
+First RTL version. Icarus Verilog 13: TEST PASSED for PIPE = 0, 1 and 2 (260,662 results each, 0 errors, 0 golden/reference mismatches, no coverage holes). The `$readmemh` "Not enough words" warning is expected: the vector memory is sized larger than the file.
 
 ## Run (Icarus Verilog 12 or newer)
 ```

@@ -9,6 +9,8 @@
 //     negative the decision is flipped (one XOR on a 1-bit signal).
 //   * use_ext_sel/ext_sel: lets this slice's mux follow the partner's decision,
 //     so both bytes of a 16-bit lane always come from the same lane.
+`timescale 1ns/1ps
+
 module cmp_slice (
     input  logic [7:0] a,
     input  logic [7:0] b,

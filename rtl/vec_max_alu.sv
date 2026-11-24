@@ -12,6 +12,8 @@
 // Lanes: INT8 byte i = in_vec[8i+7:8i]. 16-bit lane j = in_vec[16j+15:16j].
 // Tree pairing pairs bytes two apart (B0/B2, B1/B3, B4/B6, B5/B7), so the
 // INT16/BF16 tree is a subset of the INT8 tree and every slice is shared.
+`timescale 1ns/1ps
+
 module vec_max_alu #(
     parameter int PIPE = 1
 ) (
@@ -153,11 +155,11 @@ module vec_max_alu #(
         .pick(pk6), .y(y6)
     );
 
-    always_comb begin
-        if (bf_2 && nan_2)  result_d = 16'h7FC0;
-        else if (i8_2)      result_d = {{8{y6[7]}}, y6};
-        else                result_d = {t1_2, t0_2};
-    end
+    logic [15:0] int8_ext;
+    assign int8_ext = {{8{y6[7]}}, y6};          // INT8 result, sign-extended to 16 bits
+    assign result_d = (bf_2 && nan_2) ? 16'h7FC0 :
+                      i8_2            ? int8_ext  :
+                                        {t1_2, t0_2};
 
     // ------------------------------------------------------------------
     // Output register
