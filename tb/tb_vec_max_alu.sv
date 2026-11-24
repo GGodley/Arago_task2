@@ -83,7 +83,7 @@ module tb_vec_max_alu;
                     b8 = v[8*j +: 8];
                     if (b8 > best8) begin best8 = b8; lane = j; end
                 end
-                r = {{8{best8[7]}}, best8};
+                r = {8'h00, best8};                  // upper byte discarded by spec, driven to zero
             end else if (md == 2'b10) begin
                 anynan = 1'b0;
                 for (j = 0; j < 4; j = j + 1) begin
@@ -170,7 +170,9 @@ module tb_vec_max_alu;
         begin
             for (j = 0; j < n; j = j + 1) begin
                 @(negedge clk);
-                in_valid = 1'b0; in_vec = {$urandom, $urandom}; mode = $urandom;   // junk while idle
+                in_valid = 1'b0;
+                if ($urandom % 2) begin in_vec = {$urandom, $urandom}; mode = $urandom; end   // junk while idle
+                else              begin in_vec = 'x;                   mode = 'x;       end   // or unknown: must never leak
             end
         end
     endtask
@@ -199,9 +201,9 @@ module tb_vec_max_alu;
                 $display("ERROR @%0d: out_valid with nothing expected", cycle); errors = errors + 1;
             end else begin
                 checked = checked + 1;
-                if ((^result) === 1'bx) begin
-                    $display("ERROR @%0d: X on result", cycle); errors = errors + 1;
-                end else if (result !== exp_q[rd]) begin
+                assert (!$isunknown(result))
+                    else begin $display("ERROR @%0d: X on result", cycle); errors = errors + 1; end
+                if (!$isunknown(result) && (result !== exp_q[rd])) begin
                     errors = errors + 1;
                     if (errors <= 20)
                         $display("ERROR @%0d: mode=%0d in=%016h expected=%04h got=%04h",

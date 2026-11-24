@@ -15,7 +15,7 @@ def ref(mode, v):
     if mode == 0:
         lanes = [(v >> 8*i) & 0xFF for i in range(8)]
         lanes = [x - 256 if x > 127 else x for x in lanes]
-        return max(lanes) & 0xFFFF
+        return max(lanes) & 0xFF          # INT8: upper byte discarded by spec, driven to zero
     lanes = [(v >> 16*i) & 0xFFFF for i in range(4)]
     if mode in (1, 3):
         s = [x - 65536 if x > 32767 else x for x in lanes]
@@ -55,6 +55,33 @@ for nan in (0x7FC0, 0xFFC0, 0x7F81, 0xFF81, 0x7FFF):
         for other in (0x7F80, 0xFF80, 0x3F80, 0x0000):
             vecs.append((2, pack([nan if k == i else other for k in range(4)], 16)))
 vecs.append((2, pack([0x7FC0, 0xFFC0, 0x7F81, 0xFFFF], 16)))
+
+# 2b. Directed cases from the external audit (also covered by the exhaustive sets, listed for traceability)
+audit_bf = [
+    [0xC120, 0xC000, 0xC120, 0xC000],   # -10.0 vs -2.0: negatives, different high bytes
+    [0xC080, 0xC040, 0xC080, 0xC040],   # -4.0 vs -3.0: same high byte, chain under inv_neg
+    [0xC000, 0xC000, 0xC000, 0xC000],   # equal negatives: tie under the flip
+    [0x8000, 0x8000, 0x8000, 0x8000],   # all -0 -> -0
+    [0x0001, 0x0000, 0x0001, 0x0000],   # smallest positive subnormal vs +0
+    [0x7F80, 0x7F7F, 0xFF80, 0xFF7F],   # +Inf vs +max, -Inf vs -max
+]
+for t in audit_bf:
+    vecs.append((2, pack(t, 16)))
+for perm in set(itertools.permutations([0x8000, 0x8000, 0x8000, 0x0000])):   # +0 in each lane wins
+    vecs.append((2, pack(perm, 16)))
+for perm in itertools.permutations([0x8001, 0x8000, 0x807F, 0x80FF]):        # negative subnormals vs -0
+    vecs.append((2, pack(perm, 16)))
+for nan in (0x7FC0, 0x7F81, 0xFFC0, 0xFF81):                                   # every NaN with +-Inf, every lane
+    for inf in (0x7F80, 0xFF80):
+        for i in range(4):
+            vecs.append((2, pack([nan if k == i else inf for k in range(4)], 16)))
+audit_i16 = [[0x0180, 0x0101, 0x0180, 0x0101],   # +384 vs +257: low byte has bit 7 set
+             [0xFF80, 0xFF01, 0xFF80, 0xFF01],   # -128 vs -255: low byte must compare unsigned
+             [0x8000, 0x7FFF, 0x8000, 0x7FFF]]   # -32768 vs +32767
+for t in audit_i16:
+    vecs.append((1, pack(t, 16)))
+for t in ([0x80] * 8, [0x80, 0x7F] * 4, [0xFF, 0x00] * 4):                     # INT8 extremes
+    vecs.append((0, pack(t, 8)))
 
 # 3. Same bit pattern in every mode on consecutive cycles (mode travels with data)
 for _ in range(50):
