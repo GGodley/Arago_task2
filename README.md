@@ -10,6 +10,9 @@ Throughput is one vector per cycle.
 - `tb/vectors.hex`: 160,612 golden vectors (`{mode, in_vec, expected}`)
 - `scripts/gen_vectors.py`: regenerates `tb/vectors.hex`
 - `scripts/run_sim.sh`: compiles and runs the testbench for PIPE = 0, 1, 2
+- `rtl_verilog/`: plain Verilog-2001 port of the RTL (same ports, `PIPE`, slice reuse); header comments map each SV construct to Verilog
+- `scripts/run_sim_verilog.sh`: runs the same testbench on the Verilog port (also compiles it alone with `-g2001`)
+- `scripts/check_equiv.sh` + `tb/tb_equiv_sv_vs_v.sv`: runs SV and Verilog side by side and checks outputs match every cycle
 - `model/`: bit-accurate Python models used to validate the architecture before RTL (NumPy). `validate_signflip_slice.py` matches the RTL; the others are the alternatives evaluated (XOR-key, dual-polarity select, unified slice)
 
 ## Status
