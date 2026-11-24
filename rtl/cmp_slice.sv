@@ -9,7 +9,13 @@
 //     negative the decision is flipped (one XOR on a 1-bit signal).
 //   * use_ext_sel/ext_sel: lets this slice's mux follow the partner's decision,
 //     so both bytes of a 16-bit lane always come from the same lane.
-`timescale 1ns/1ps
+//
+// Evaluation order inside a 16-bit pair (why the pair is not a loop):
+//   low.a/b -> low.pick -> high.gt_in -> high.pick -> low.ext_sel -> low.y
+// ext_sel only reaches the mux (y), never pick, so the gate-level graph is acyclic.
+// Checked with Verilator -Wall (lint and full build) and Yosys `check`: no loops.
+//
+// Timescale is set by the simulation build (see scripts/run_sim.sh), not here.
 
 module cmp_slice (
     input  logic [7:0] a,
@@ -31,6 +37,12 @@ module cmp_slice (
     assign gt8  = (ak > bk);                              // synthesizes to a log-depth gt/eq tree
     assign eq8  = (a == b);
     assign full = gt8 | (eq8 & chain_en & gt_in);
+
+    // BF16 decision flip. Two facts make this one XOR exact:
+    //   * Tie (a == b, both negative): full = 0 and the flip gives pick = 1, so a is
+    //     chosen instead of b. They are identical, so the max is unchanged.
+    //   * -0.0 vs +0.0: the signs differ, so a[7] & b[7] = 0 and there is no flip. The
+    //     sign-flipped keys put +0 (8'h80) above -0 (8'h00), so +0 wins (IEEE 754-2019).
     assign pick = full ^ (inv_neg & a[7] & b[7]);
     assign sel  = use_ext_sel ? ext_sel : pick;
     assign y    = sel ? a : b;
